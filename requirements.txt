@@ -1,0 +1,7 @@
+python-dotenv==1.2.1
+pyspark==3.5.7
+pyarrow==22.0.0
+numpy==2.3.5
+lightgbm==4.6.0
+azure-storage-queue==12.14.1
+APScheduler==3.11.2
