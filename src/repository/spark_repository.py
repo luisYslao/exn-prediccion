@@ -17,7 +17,7 @@ def create_spark():
         .config("spark.driver.extraJavaOptions", "-Djava.library.path=libs")
         .getOrCreate()
     )
-    #spark.sparkContext.setLogLevel(settings.LOG_LEVEL)
+    spark.sparkContext.setLogLevel("WARN")
     return spark
 
 

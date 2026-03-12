@@ -360,6 +360,8 @@ def build_prediction_ml(date, df_data, df_comercios):
             f"C.{PrediccionesSchema.RUC}",
             #f"C.{PrediccionesSchema.CODCOMERCIO}",
             f"C.{PrediccionesSchema.MCC}",
+            f"C.{ComerciosSchema.NOMCOMERCIAL}",
+            f"C.{CEspecialesSchema.CORREO_NOTI}",
             col(ComerciosSchema.ID).alias(PrediccionesSchema.ID_COMERCIO),
             MlTrainSchema.FECHA,
             * MlTrainSchema.FEATURES
@@ -378,7 +380,7 @@ def prepare_data(spark):
         spark,
         DB_PREDICTION_NAME,
         TABLE_COMERCIOS_NAME,
-        f"C.{ComerciosSchema.ID}, C.{ComerciosSchema.RUC}, C.{ComerciosSchema.CODCOMERCIO}, C.{ComerciosSchema.MCC}, C.{ComerciosSchema.ID_CUENTA_ESPECIAL}, CS.{CEspecialesSchema.CORREO_NOTI}",
+        f"C.{ComerciosSchema.ID}, C.{ComerciosSchema.RUC}, C.{ComerciosSchema.CODCOMERCIO}, C.{ComerciosSchema.NOMCOMERCIAL}, C.{ComerciosSchema.MCC}, C.{ComerciosSchema.ID_CUENTA_ESPECIAL}, CS.{CEspecialesSchema.CORREO_NOTI}",
         f"LEFT JOIN {TABLE_CESPECIALES_NAME} ON C.{ComerciosSchema.ID_CUENTA_ESPECIAL} = CS.{CEspecialesSchema.ID}"
     )
     
@@ -439,8 +441,11 @@ def predict_next_day(df_predict, model_path):
 
         if(notifica):
             send_queue_mail(
+                row[CEspecialesSchema.CORREO_NOTI],
                 row[MlTrainSchema.CODCOMERCIO],
-                round(pred, 2)
+                round(pred, 2),
+                row[ComerciosSchema.NOMCOMERCIAL],
+                row[PrediccionesSchema.RUC],
             )
 
         results.append({
@@ -474,23 +479,24 @@ def save_predictions(spark, results):
     write_sql_table(df_results, DB_PREDICTION_NAME, TABLE_PREDICCIONES_NAME, "append")
 
 
-def send_queue_mail(code, prediction):
+def send_queue_mail(correo_noti, code, prediction, d_code, ruc):
     logger.info("Send notify by email")
     queue_client = QueueClient.from_connection_string(
         conn_str=settings.QUEUE_CN,
         queue_name=settings.QUEUE_NAME,
         message_encode_policy=TextBase64EncodePolicy()
     )
+    to = [c.strip() for c in correo_noti.split("|")] if correo_noti else []
     mensaje = {
         "notification_id": 0,
-        "to": [
-            "dev.expressnet@devmatte.com", "pcherre@expressnet.com.pe"
-        ],
+        "to": to,
         "cc": [],
         "template_id": "10014",
         "template_data": {
             "code":code,
-            "prediction": prediction
+            "prediction": prediction,
+            "dCode": d_code,
+            "ruc": ruc
         },
         "attachments": []
     }
