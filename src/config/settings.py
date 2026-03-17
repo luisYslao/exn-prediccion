@@ -19,6 +19,7 @@ class Settings:
         self.DOUBLE_FROM_YEAR = int(os.getenv("DOUBLE_FROM_YEAR"))
         self.EXECUTION_DAY = os.getenv("EXECUTION_DAY")
         self.LAG_EXECUTION = int(os.getenv("LAG_EXECUTION"))
+        self.HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", "15"))
         self.QUEUE_NAME = os.getenv("QUEUE_NAME")
         self.QUEUE_CN = os.getenv("QUEUE_CN")
 

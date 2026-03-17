@@ -19,6 +19,8 @@ from pyspark.sql.types import (
 )
 from azure.storage.queue import QueueClient, TextBase64EncodePolicy
 from datetime import datetime, timedelta
+
+MONTH_ABBR = ["", "ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SET", "OCT", "NOV", "DIC"]
 from decimal import Decimal, ROUND_HALF_UP
 import lightgbm as lgb
 import numpy as np
@@ -404,7 +406,8 @@ def prepare_data(spark):
             )
             results = predict_next_day(
                 df_predict,
-                f"{MODEL_DEN_PATH}/{model_path}"
+                f"{MODEL_DEN_PATH}/{model_path}",
+                df_data,
             )
             logger.info("Save results of predictions ...")
             save_predictions(spark, results)
@@ -413,7 +416,7 @@ def prepare_data(spark):
             logger.warning(str(e))
 
 
-def predict_next_day(df_predict, model_path):
+def predict_next_day(df_predict, model_path, df_data):
     model = lgb.Booster(model_file=model_path)
     logger.info("Model loaded...")
 
@@ -440,12 +443,20 @@ def predict_next_day(df_predict, model_path):
         )
 
         if(notifica):
+            history = (
+                df_data
+                .filter(col(MlTrainSchema.CODCOMERCIO) == row[MlTrainSchema.CODCOMERCIO])
+                .select(MlTrainSchema.FECHA, MlTrainSchema.TOTAL)
+                .orderBy(MlTrainSchema.FECHA)
+                .tail(settings.HISTORY_DAYS)
+            )
             send_queue_mail(
                 row[CEspecialesSchema.CORREO_NOTI],
                 row[MlTrainSchema.CODCOMERCIO],
                 round(pred, 2),
                 row[ComerciosSchema.NOMCOMERCIAL],
                 row[PrediccionesSchema.RUC],
+                history,
             )
 
         results.append({
@@ -479,7 +490,7 @@ def save_predictions(spark, results):
     write_sql_table(df_results, DB_PREDICTION_NAME, TABLE_PREDICCIONES_NAME, "append")
 
 
-def send_queue_mail(correo_noti, code, prediction, d_code, ruc):
+def send_queue_mail(correo_noti, code, prediction, d_code, ruc, history):
     logger.info("Send notify by email")
     queue_client = QueueClient.from_connection_string(
         conn_str=settings.QUEUE_CN,
@@ -487,16 +498,20 @@ def send_queue_mail(correo_noti, code, prediction, d_code, ruc):
         message_encode_policy=TextBase64EncodePolicy()
     )
     to = [c.strip() for c in correo_noti.split("|")] if correo_noti else []
+    labels = ",".join(f"'{MONTH_ABBR[r[MlTrainSchema.FECHA].month]}-{r[MlTrainSchema.FECHA].day}'" for r in history)
+    data = ",".join(str(int(r[MlTrainSchema.TOTAL])) for r in history)
     mensaje = {
         "notification_id": 0,
         "to": to,
         "cc": [],
         "template_id": "10014",
         "template_data": {
-            "code":code,
+            "code": code,
             "prediction": prediction,
             "dCode": d_code,
-            "ruc": ruc
+            "ruc": ruc,
+            "labels": labels,
+            "data": data,
         },
         "attachments": []
     }
