@@ -4,14 +4,14 @@ from config.settings import settings
 from domain.schemas import MlTrainSchema, ComerciosSchema, CEspecialesSchema, PrediccionesSchema, DenegadasTable, DenegadasSchema
 from config.constants import (
     CURRENT_DEN_PATH, PERU_HOLIDAYS, MODEL_DEN_PATH, TABLE_PREDICCIONES_NAME,
-    DB_PREDICTION_NAME, TABLE_COMERCIOS_NAME, TABLE_CESPECIALES_NAME,
+    DB_PREDICTION_NAME, DB_COMERCIOS_NAME, TABLE_COMERCIOS_NAME, TABLE_CESPECIALES_NAME,
     AGG_DEN_PATH,
 )
 from pyspark.sql import Window
 from pyspark.sql.functions import (
-    col, dayofweek, dayofmonth, weekofyear, year, month, when, 
+    col, dayofweek, dayofmonth, weekofyear, year, month, when,
     date_sub, day, lag, avg, lit, stddev, concat, trim, to_date,
-    count, explode, sequence, expr, min
+    count, explode, sequence, expr, min, broadcast
 )
 from pyspark.sql.types import (
     StructType, StructField, DecimalType, BooleanType,
@@ -359,12 +359,10 @@ def build_prediction_ml(date, df_data, df_comercios):
         df_predict
         .join(df_comercios.alias("C"), PrediccionesSchema.CODCOMERCIO, "left")
         .select(
-            f"C.{PrediccionesSchema.RUC}",
-            #f"C.{PrediccionesSchema.CODCOMERCIO}",
-            f"C.{PrediccionesSchema.MCC}",
+            f"C.{ComerciosSchema.RUC}",
             f"C.{ComerciosSchema.NOMCOMERCIAL}",
             f"C.{CEspecialesSchema.CORREO_NOTI}",
-            col(ComerciosSchema.ID).alias(PrediccionesSchema.ID_COMERCIO),
+            f"C.{ComerciosSchema.MCC}",
             MlTrainSchema.FECHA,
             * MlTrainSchema.FEATURES
         )
@@ -378,13 +376,23 @@ def prepare_data(spark):
     logger.info(f"Execution day for : {execution_date}")
 
     logger.info("Load data for comercios")
-    df_comercios = read_sql_table(
-        spark,
-        DB_PREDICTION_NAME,
-        TABLE_COMERCIOS_NAME,
-        f"C.{ComerciosSchema.ID}, C.{ComerciosSchema.RUC}, C.{ComerciosSchema.CODCOMERCIO}, C.{ComerciosSchema.NOMCOMERCIAL}, C.{ComerciosSchema.MCC}, C.{ComerciosSchema.ID_CUENTA_ESPECIAL}, CS.{CEspecialesSchema.CORREO_NOTI}",
-        f"LEFT JOIN {TABLE_CESPECIALES_NAME} ON C.{ComerciosSchema.ID_CUENTA_ESPECIAL} = CS.{CEspecialesSchema.ID}"
+    mccs = [
+        int(f.replace(f"model_{MlTrainSchema.MCC}=", "").replace(".txt", ""))
+        for f in os.listdir(MODEL_DEN_PATH) if not skip_model(f)
+    ]
+    mcc_list = ",".join(str(m) for m in mccs)
+    df_com = read_sql_table(
+        spark, DB_COMERCIOS_NAME, f"{TABLE_COMERCIOS_NAME} C",
+        f"C.[COD  COMERCIO] AS {ComerciosSchema.CODCOMERCIO}, "
+        f"C.[NOMB  COMERCIAL] AS {ComerciosSchema.NOMCOMERCIAL}, "
+        f"C.{ComerciosSchema.RUC}, CAST(C.{ComerciosSchema.MCC} AS INT) AS {ComerciosSchema.MCC}",
+        where=f"CAST(C.{ComerciosSchema.MCC} AS INT) IN ({mcc_list})"
     )
+    df_ce = read_sql_table(
+        spark, DB_PREDICTION_NAME, TABLE_CESPECIALES_NAME,
+        f"CS.{CEspecialesSchema.RUC}, CS.{CEspecialesSchema.CORREO_NOTI}"
+    )
+    df_comercios = df_com.join(broadcast(df_ce), ComerciosSchema.RUC, "left")
     
     for model_path in os.listdir(MODEL_DEN_PATH):
         logger.info("Reading models in: " + model_path)
@@ -443,27 +451,32 @@ def predict_next_day(df_predict, model_path, df_data):
         )
 
         if(notifica):
-            history = (
+            fecha = row[MlTrainSchema.FECHA]
+            chart_data = (
                 df_data
                 .filter(col(MlTrainSchema.CODCOMERCIO) == row[MlTrainSchema.CODCOMERCIO])
                 .select(MlTrainSchema.FECHA, MlTrainSchema.TOTAL)
                 .orderBy(MlTrainSchema.FECHA)
                 .tail(settings.HISTORY_DAYS)
             )
+            chart_labels = ",".join(f"'{MONTH_ABBR[r[MlTrainSchema.FECHA].month]}-{r[MlTrainSchema.FECHA].day}'" for r in chart_data)
+            chart_labels += f",'{MONTH_ABBR[fecha.month]}-{fecha.day}'"
+            chart_values = ",".join(str(int(r[MlTrainSchema.TOTAL])) for r in chart_data)
+            chart_values += f",{round(pred)}"
             send_queue_mail(
                 row[CEspecialesSchema.CORREO_NOTI],
                 row[MlTrainSchema.CODCOMERCIO],
-                round(pred, 2),
+                round(pred),
                 row[ComerciosSchema.NOMCOMERCIAL],
                 row[PrediccionesSchema.RUC],
-                history,
+                chart_labels,
+                chart_values,
             )
 
         results.append({
-            PrediccionesSchema.RUC: row[PrediccionesSchema.RUC],
+            PrediccionesSchema.RUC: row[ComerciosSchema.RUC],
             PrediccionesSchema.CODCOMERCIO: row[MlTrainSchema.CODCOMERCIO],
-            PrediccionesSchema.MCC: row[MlTrainSchema.MCC],
-            PrediccionesSchema.ID_COMERCIO: row[PrediccionesSchema.ID_COMERCIO],
+            PrediccionesSchema.MCC: row[ComerciosSchema.MCC],
             PrediccionesSchema.FECHA: row[MlTrainSchema.FECHA],
             PrediccionesSchema.PREDICCION: pred_dec,
             PrediccionesSchema.NOTIFICA: notifica
@@ -477,7 +490,6 @@ def save_predictions(spark, results):
         StructField(PrediccionesSchema.RUC, StringType(), True),
         StructField(PrediccionesSchema.CODCOMERCIO, StringType(), True),
         StructField(PrediccionesSchema.MCC, IntegerType(), True),
-        StructField(PrediccionesSchema.ID_COMERCIO, IntegerType(), True),
         StructField(PrediccionesSchema.FECHA, DateType(), True),
         StructField(PrediccionesSchema.PREDICCION, DecimalType(18, 10), False),
         StructField(PrediccionesSchema.NOTIFICA, BooleanType(), False)
@@ -490,7 +502,7 @@ def save_predictions(spark, results):
     write_sql_table(df_results, DB_PREDICTION_NAME, TABLE_PREDICCIONES_NAME, "append")
 
 
-def send_queue_mail(correo_noti, code, prediction, d_code, ruc, history):
+def send_queue_mail(correo_noti, code, prediction, d_code, ruc, labels, data):
     logger.info("Send notify by email")
     queue_client = QueueClient.from_connection_string(
         conn_str=settings.QUEUE_CN,
@@ -498,8 +510,6 @@ def send_queue_mail(correo_noti, code, prediction, d_code, ruc, history):
         message_encode_policy=TextBase64EncodePolicy()
     )
     to = [c.strip() for c in correo_noti.split("|")] if correo_noti else []
-    labels = ",".join(f"'{MONTH_ABBR[r[MlTrainSchema.FECHA].month]}-{r[MlTrainSchema.FECHA].day}'" for r in history)
-    data = ",".join(str(int(r[MlTrainSchema.TOTAL])) for r in history)
     mensaje = {
         "notification_id": 0,
         "to": to,
@@ -515,7 +525,6 @@ def send_queue_mail(correo_noti, code, prediction, d_code, ruc, history):
         },
         "attachments": []
     }
-
     queue_client.send_message(json.dumps(mensaje))
     
 

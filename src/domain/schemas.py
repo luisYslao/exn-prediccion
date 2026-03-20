@@ -88,18 +88,15 @@ class CEspecialesSchema:
     CORREO_NOTI = "CORREO_NOTI"
 
 class ComerciosSchema:
-    ID = "ID"
     RUC = "RUC"
     CODCOMERCIO = "CODCOMERCIO"
     NOMCOMERCIAL = "NOMCOMERCIAL"
     MCC = "MCC"
-    ID_CUENTA_ESPECIAL = "ID_CUENTA_ESPECIAL"
 
 class PrediccionesSchema:
     RUC = "RUC"
     CODCOMERCIO = "CODCOMERCIO"
     MCC = "MCC"
-    ID_COMERCIO = "ID_COMERCIO"
     FECHA = "FECHA"
     PREDICCION = "PREDICCION"
     NOTIFICA = "NOTIFICA"

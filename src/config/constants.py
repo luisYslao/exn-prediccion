@@ -15,6 +15,7 @@ PERU_HOLIDAYS = [
     "10-8", "11-1", "12-8", "12-9", "12-25"
 ]
 DB_PREDICTION_NAME = "DBPrediction"
-TABLE_COMERCIOS_NAME = "[dbo].[Comercios] C"
+DB_COMERCIOS_NAME = "Comercios"
+TABLE_COMERCIOS_NAME = "[dbo].[comercios]"
 TABLE_CESPECIALES_NAME = "[dbo].[CuentasEspeciales] CS"
 TABLE_PREDICCIONES_NAME = "[dbo].[Predicciones]"
