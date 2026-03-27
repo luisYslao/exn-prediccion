@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; }
+  h1 { border-bottom: 2px solid #ddd; padding-bottom: 8px; }
+  h2 { border-bottom: 1px solid #eee; padding-bottom: 6px; margin-top: 40px; }
+  h3 { margin-top: 28px; }
+  code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f4f4f4; padding: 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+  th { background: #f0f0f0; }
+  blockquote { border-left: 4px solid #ccc; margin: 0; padding: 8px 16px; color: #555; background: #fafafa; }
+  hr { border: none; border-top: 1px solid #eee; margin: 32px 0; }
+</style>
+</head>
+<body>
+<h1>Prediccion3 — Sistema de Predicción de Transacciones Denegadas</h1>
+<hr />
+<h2>Guía de operación</h2>
+<h3>¿Qué hace este sistema?</h3>
+<p>Todos los días al mediodía el sistema analiza el historial de transacciones denegadas de cada comercio y predice cuántas denegaciones tendrá al día siguiente. Si la predicción supera un nivel de alerta, envía automáticamente un correo de notificación al responsable de cuenta de ese comercio.</p>
+<hr />
+<h3>Notificaciones por correo</h3>
+<p>Las notificaciones se envían únicamente a los comercios registrados en la tabla <strong><code>[DBPrediction].[dbo].[CuentasEspeciales]</code></strong>. Un comercio sin registro en esa tabla no recibirá alertas aunque su predicción sea alta.</p>
+<p><strong>Para agregar o modificar un comercio con notificación</strong>, insertar o actualizar directamente en esa tabla.</p>
+<p>Agregar nuevo comercio:</p>
+<pre><code class="language-sql">INSERT INTO [DBPrediction].[dbo].[CuentasEspeciales]
+    (RUC, RAZON_SOCIAL, NOMBRE_COMERCIAL, CORREO_NOTI, ...)
+VALUES
+    ('00000000000', 'Empresa S.A.', 'Nombre Comercial', 'correo@empresa.com', ...)
+</code></pre>
+<p>Actualizar correo de un comercio existente:</p>
+<pre><code class="language-sql">UPDATE [DBPrediction].[dbo].[CuentasEspeciales]
+SET CORREO_NOTI = 'nuevo@empresa.com'
+WHERE RUC = '00000000000'
+</code></pre>
+<blockquote>
+<p><strong>Correos múltiples:</strong> para enviar la notificación a más de un destinatario, separar los correos con <code>|</code> en el campo <code>CORREO_NOTI</code>.
+Ejemplo: <code>correo1@empresa.com|correo2@empresa.com|correo3@empresa.com</code></p>
+</blockquote>
+<hr />
+<h3>Cuándo se dispara la alerta</h3>
+<p>La notificación se envía cuando se cumplen las tres condiciones a la vez:</p>
+<ul>
+<li>La predicción del día siguiente <strong>es mayor o igual al promedio de los últimos 7 días</strong></li>
+<li>Ese promedio de 7 días <strong>es mayor a 0</strong> (el comercio tiene actividad reciente)</li>
+<li>La predicción <strong>es de 5 o más transacciones denegadas</strong></li>
+</ul>
+<p>Un comercio que cumple estas condiciones pero no está en <code>CuentasEspeciales</code> igualmente se guarda en <code>Predicciones</code> con <code>NOTIFICA = 1</code>, pero no recibe correo.</p>
+<hr />
+<h3>Mantenimiento del modelo — reentrenamiento periódico</h3>
+<p>Los modelos de predicción aprenden del comportamiento histórico de las transacciones. Con el tiempo, los patrones cambian y el modelo pierde precisión.</p>
+<p><strong>Se recomienda reentrenar los modelos cada 6 meses</strong> ejecutando el script de entrenamiento (<code>main.py</code>). Si se observa que las predicciones empiezan a ser consistentemente muy altas o muy bajas respecto a lo real, es señal de que el modelo necesita actualizarse antes de ese plazo.</p>
+<p>Los modelos entrenados se guardan en <code>tmp/models/denied/</code>. Al reemplazarlos, el proceso del día siguiente ya usará los nuevos automáticamente sin necesidad de reiniciar el servicio.</p>
+<hr />
+<h3>Verificar que el sistema está funcionando</h3>
+<p>El sistema corre como un servicio de Windows llamado <strong><code>PrediccionService</code></strong>. Para ver su estado:</p>
+<pre><code class="language-cmd">sc query PrediccionService
+</code></pre>
+<p>Si el servicio está corriendo y aun así no se están guardando predicciones o no llegan correos, revisar los logs en la carpeta <code>logs/</code>:</p>
+<ul>
+<li><code>service_stdout.log</code> — salida normal del proceso</li>
+<li><code>service_stderr.log</code> — errores</li>
+</ul>
+<hr />
+<h3>Pausar o reiniciar el proceso</h3>
+<pre><code class="language-cmd">net stop PrediccionService      # Detener
+net start PrediccionService     # Iniciar
+</code></pre>
+<blockquote>
+<p>Cualquier cambio en la configuración (<code>.env</code>) o en el código requiere reiniciar el servicio para tomar efecto.</p>
+</blockquote>
+<hr />
+<h2>Descripción técnica</h2>
+<p>Sistema que predice el volumen de transacciones denegadas por comercio para el día siguiente, usando modelos LightGBM entrenados por categoría MCC. Cuando la predicción supera un umbral de alerta, envía una notificación por correo vía Azure Queue Storage.</p>
+<hr />
+<h2>Estructura del proyecto</h2>
+<pre><code>Prediccion3/
+├── src/
+│   ├── prediction.py              # Módulo principal de predicción
+│   ├── scheduler_service.py       # Servicio que ejecuta el proceso en horario
+│   ├── main.py                    # Scripts ETL y utilidades
+│   ├── config/
+│   │   ├── constants.py           # Rutas, nombres de tablas y BD
+│   │   ├── settings.py            # Variables de entorno
+│   │   └── logging_config.py      # Configuración de logs
+│   ├── domain/
+│   │   └── schemas.py             # Definición de columnas por tabla/schema
+│   └── repository/
+│       └── spark_repository.py    # Funciones JDBC (read/write SQL Server)
+├── libs/
+│   ├── mssql-jdbc-12.10.2.jre11.jar
+│   └── nssm.exe
+├── logs/                          # Logs del servicio Windows
+├── tmp/                           # Archivos temporales Spark (parquet, modelos)
+├── db.sql                         # Scripts DDL de las tablas SQL Server
+├── install_service.bat            # Instalador del servicio Windows (NSSM)
+└── .env                           # Variables de entorno (no versionar)
+</code></pre>
+<hr />
+<h2>Bases de datos</h2>
+<table>
+<thead>
+<tr>
+<th>Base de datos</th>
+<th>Descripción</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Denegadas</code></td>
+<td>Historial de transacciones denegadas por año</td>
+</tr>
+<tr>
+<td><code>Comercios</code></td>
+<td>Catálogo maestro de comercios</td>
+</tr>
+<tr>
+<td><code>DBPrediction</code></td>
+<td>Base de datos del sistema de predicción</td>
+</tr>
+</tbody>
+</table>
+<h3>Tablas en <code>DBPrediction</code></h3>
+<p><strong><code>[dbo].[CuentasEspeciales]</code></strong> — Comercios con cuenta especial asignada. Provee el correo de notificación vinculado por RUC.</p>
+<p><strong><code>[dbo].[Predicciones]</code></strong> — Resultados diarios del proceso de predicción.</p>
+<table>
+<thead>
+<tr>
+<th>Campo</th>
+<th>Tipo</th>
+<th>Descripción</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ID</code></td>
+<td>int (PK, identity)</td>
+<td>Identificador único del registro</td>
+</tr>
+<tr>
+<td><code>RUC</code></td>
+<td>nvarchar</td>
+<td>RUC del comercio</td>
+</tr>
+<tr>
+<td><code>CODCOMERCIO</code></td>
+<td>nvarchar</td>
+<td>Código único del comercio</td>
+</tr>
+<tr>
+<td><code>MCC</code></td>
+<td>int</td>
+<td>Código de categoría del comercio (Merchant Category Code)</td>
+</tr>
+<tr>
+<td><code>FECHA</code></td>
+<td>date</td>
+<td>Fecha para la que se realizó la predicción</td>
+</tr>
+<tr>
+<td><code>PREDICCION</code></td>
+<td>decimal(18,10)</td>
+<td>Volumen de denegadas predicho para esa fecha</td>
+</tr>
+<tr>
+<td><code>NOTIFICA</code></td>
+<td>bit</td>
+<td><code>1</code> si la predicción superó el umbral de alerta, <code>0</code> si no</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Arquitectura</h2>
+<pre><code>main()
+  └── process()
+        ├── load_data()       → Lee denegadas desde SQL Server, agrega y guarda en parquet
+        ├── build_data()      → Genera features ML y guarda parquet por MCC
+        └── prepare_data()    → Carga modelos, predice y guarda resultados
+              └── por cada modelo MCC:
+                    ├── load_lag_data()        → Carga parquet del MCC + filtra comercios
+                    ├── build_prediction_ml()  → Construye fila a predecir con lags
+                    ├── predict_next_day()     → Aplica modelo, evalúa umbral, notifica
+                    └── save_predictions()     → Guarda predicciones en SQL Server
+</code></pre>
+<hr />
+<h2>Funciones</h2>
+<h4><code>load_data(spark)</code></h4>
+<p>Lee las tablas de denegadas año por año desde la BD <code>Denegadas</code>, agrega por <code>CODCOMERCIO + FECHA + MCC</code> y guarda el resultado en parquet particionado por MCC en <code>tmp/aggregated_features/denied</code>.</p>
+<h4><code>agregate_data(df_den)</code></h4>
+<p>Recibe un DataFrame de denegadas crudas, limpia <code>CODCOMERCIO</code>, convierte <code>FECHAOP</code> a fecha, reemplaza MCC nulo por <code>-1</code> y hace <code>COUNT(*)</code> por comercio/fecha/MCC.</p>
+<h4><code>build_data(spark)</code></h4>
+<p>Lee el parquet agregado, valida que existan registros del día anterior a <code>EXECUTION_DAY</code> y llama a <code>build_ml()</code>.</p>
+<h4><code>build_ml(df, current_path)</code></h4>
+<p>Genera el dataset de entrenamiento completo:
+- Expande el calendario por comercio (sin huecos de fechas)
+- Agrega features de calendario: DOW, WEEK, DAY, MONTH, YEAR, IS_WEEKEND, IS_HOLIDAY, IS_PAYDAY, IS_MONTH_START, IS_MONTH_END
+- Calcula features de series de tiempo: lags 1/2/7/14/30, medias móviles 7/14, desviación estándar 7, diferencia semanal
+- Guarda solo los últimos <code>LAG_EXECUTION</code> días en <code>tmp/current_features/denied</code> particionado por MCC</p>
+<h4><code>skip_model(model_path)</code></h4>
+<p>Retorna <code>True</code> si el archivo no es un modelo válido (descarta MCC=-1, MCC=0 y archivos sin "MCC" en el nombre).</p>
+<h4><code>load_lag_data(spark, date, data_path, model_path, df_comercios)</code></h4>
+<p>Extrae el MCC del nombre del modelo, carga el parquet correspondiente filtrando <code>FECHA &lt; date</code>, agrega la columna MCC y filtra <code>df_comercios</code> por ese MCC.
+<strong>Retorna:</strong> <code>(df_data, df_comercios_filtrado)</code></p>
+<h4><code>build_prediction_ml(date, df_data, df_comercios)</code></h4>
+<p>Construye la fila de predicción para <code>date</code>:
+1. Crea <code>df_last</code>: fila con CODCOMERCIO del día anterior, FECHA=date, TOTAL=0
+2. Agrega features de calendario para <code>date</code>
+3. Une con <code>df_data</code> (histórico) para calcular lags y medias móviles en contexto
+4. Filtra solo la fila de <code>date</code>
+5. Hace JOIN con <code>df_comercios</code> para enriquecer con RUC, NOMCOMERCIAL, CORREO_NOTI, MCC</p>
+<p><strong>Retorna:</strong> <code>df_predict</code> con una fila por comercio del MCC</p>
+<h4><code>prepare_data(spark)</code></h4>
+<p>Función principal de predicción:
+- Extrae los MCCs disponibles desde los archivos de modelo
+- Carga <code>df_com</code> desde <code>[Comercios].[dbo].[comercios]</code> filtrado por MCC en SQL
+- Carga <code>df_ce</code> desde <code>[DBPrediction].[dbo].[CuentasEspeciales]</code> (broadcast join por RUC)
+- Itera sobre cada modelo, genera predicciones y las guarda</p>
+<h4><code>predict_next_day(df_predict, model_path, df_data)</code></h4>
+<p>Aplica el modelo LightGBM a cada fila de <code>df_predict</code>:
+- <strong>Umbral de notificación:</strong> <code>prediccion &gt;= media_movil_7dias</code> AND <code>media_movil &gt; 0</code> AND <code>prediccion &gt;= 5</code>
+- Si notifica: obtiene últimos <code>HISTORY_DAYS</code> del histórico, construye labels/valores del gráfico (incluyendo la predicción como último punto) y encola el mensaje</p>
+<p><strong>Retorna:</strong> lista de dicts para <code>save_predictions()</code></p>
+<h4><code>save_predictions(spark, results)</code></h4>
+<p>Crea un DataFrame Spark con el schema de <code>Predicciones</code> y lo escribe en <code>[DBPrediction].[dbo].[Predicciones]</code> en modo <code>append</code>.</p>
+<h4><code>send_queue_mail(correo_noti, code, prediction, d_code, ruc, labels, data)</code></h4>
+<p>Encola un mensaje en Azure Queue Storage con el template de notificación. El campo <code>labels</code> y <code>data</code> contienen el histórico + predicción formateados para el gráfico del email.</p>
+<hr />
+<h2>Ejecución automática diaria</h2>
+<p>El proceso corre como servicio Windows (<code>PrediccionService</code>) gestionado por NSSM. El scheduler está definido en <code>scheduler_service.py</code> usando APScheduler.</p>
+<p><strong>Horario:</strong> todos los días a las <strong>12:00</strong> (mediodía).</p>
+<p>En cada ejecución el scheduler:
+1. Toma la fecha actual como <code>EXECUTION_DAY</code>
+2. Llama a <code>main()</code> del módulo <code>prediction.py</code>
+3. Si el proceso falla, el servicio se reinicia automáticamente tras 5 segundos</p>
+<h3>Instalación del servicio</h3>
+<pre><code class="language-bat"># Ejecutar como Administrador
+install_service.bat
+</code></pre>
+<p>Configura el servicio con:
+- Inicio automático al arrancar Windows
+- Reinicio automático si falla
+- Logs rotativos en <code>logs/service_stdout.log</code> y <code>logs/service_stderr.log</code> (máx 5MB por archivo)</p>
+<h3>Comandos de gestión</h3>
+<pre><code class="language-cmd">sc query PrediccionService              # Ver estado
+net stop PrediccionService              # Detener
+net start PrediccionService             # Iniciar
+Restart-Service PrediccionService       # Reiniciar (PowerShell admin)
+nssm remove PrediccionService confirm   # Desinstalar
+</code></pre>
+<blockquote>
+<p>Los cambios en el código requieren reiniciar el servicio para tomar efecto.</p>
+</blockquote>
+<hr />
+<h2>Variables de entorno relevantes</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Descripción</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>EXECUTION_DAY</code></td>
+<td>Fecha de ejecución <code>YYYY-MM-DD</code></td>
+</tr>
+<tr>
+<td><code>LAG_EXECUTION</code></td>
+<td>Días de histórico a cargar para features</td>
+</tr>
+<tr>
+<td><code>HISTORY_DAYS</code></td>
+<td>Días de histórico a mostrar en el gráfico del email (default: 15)</td>
+</tr>
+<tr>
+<td><code>DOUBLE_FROM_YEAR</code></td>
+<td>Año desde el que aplica tabla doble de transacciones</td>
+</tr>
+<tr>
+<td><code>JDBC_URL</code></td>
+<td>URL de conexión SQL Server</td>
+</tr>
+<tr>
+<td><code>JDBC_USER</code></td>
+<td>Usuario JDBC</td>
+</tr>
+<tr>
+<td><code>JDBC_PASSWORD</code></td>
+<td>Contraseña JDBC</td>
+</tr>
+<tr>
+<td><code>QUEUE_NAME</code></td>
+<td>Nombre del queue en Azure Storage</td>
+</tr>
+<tr>
+<td><code>QUEUE_CN</code></td>
+<td>Connection string de Azure Queue</td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>
